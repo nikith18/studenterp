@@ -1,0 +1,235 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function role() { return request.auth.token.role; }
+    function isAdmin() { return signedIn() && role() == 'admin'; }
+    function isStudent() { return signedIn() && role() == 'student'; }
+    function isFaculty() { return signedIn() && role() == 'faculty'; }
+    function isGuardian() { return signedIn() && role() == 'guardian'; }
+    function ownsStudent(studentId) { return signedIn() && request.auth.uid == studentId; }
+    function validInstitutionSettings() {
+      return request.resource.data.keys().hasOnly([
+          'defaultAttendanceThreshold',
+          'warningBuffer',
+          'countApprovedOdAsPresent',
+          'sessionDurationMinutes'
+        ])
+        && request.resource.data.defaultAttendanceThreshold is int
+        && request.resource.data.defaultAttendanceThreshold >= 50
+        && request.resource.data.defaultAttendanceThreshold <= 100
+        && request.resource.data.warningBuffer is int
+        && request.resource.data.warningBuffer >= 0
+        && request.resource.data.warningBuffer <= 50
+        && request.resource.data.countApprovedOdAsPresent is bool
+        && request.resource.data.sessionDurationMinutes is int
+        && request.resource.data.sessionDurationMinutes >= 5
+        && request.resource.data.sessionDurationMinutes <= 240;
+    }
+    function assigned(classId, subjectId) {
+      return isFaculty() && exists(/databases/$(database)/documents/faculty/$(request.auth.uid))
+        && get(/databases/$(database)/documents/faculty/$(request.auth.uid)).data.assignedClassIds.hasAny([classId])
+        && get(/databases/$(database)/documents/faculty/$(request.auth.uid)).data.assignedSubjectIds.hasAny([subjectId]);
+    }
+    function studentBelongsToClass(studentId, classId) {
+      return exists(/databases/$(database)/documents/students/$(studentId))
+        && get(/databases/$(database)/documents/students/$(studentId)).data.classId == classId
+        && exists(/databases/$(database)/documents/classes/$(classId))
+        && get(/databases/$(database)/documents/classes/$(classId)).data.studentIds.hasAny([studentId]);
+    }
+    function activeAssignedSession(sessionId) {
+      let path = /databases/$(database)/documents/attendanceSessions/$(sessionId);
+      return isFaculty()
+        && exists(path)
+        && get(path).data.status == 'open'
+        && request.time < get(path).data.expiresAt
+        && get(path).data.facultyId == request.auth.uid
+        && assigned(get(path).data.classId, get(path).data.subjectId);
+    }
+    function guardianHasStudent(studentId) {
+      let link = /databases/$(database)/documents/guardianLinks/$(request.auth.uid)/students/$(studentId);
+      return isGuardian() && exists(link) && get(link).data.status == 'approved'
+        && get(link).data.guardianId == request.auth.uid
+        && get(link).data.studentId == studentId;
+    }
+    function mayReview(classId, subjectId) {
+      return isAdmin() || assigned(classId, subjectId);
+    }
+    function validRequestCreate() {
+      return request.resource.data.keys().hasOnly([
+          'studentId', 'classId', 'subjectId', 'requestType', 'startDate',
+          'endDate', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'studentId', 'classId', 'requestType', 'startDate', 'endDate',
+          'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.classId is string
+        && exists(/databases/$(database)/documents/students/$(request.auth.uid))
+        && get(/databases/$(database)/documents/students/$(request.auth.uid)).data.classId
+          == request.resource.data.classId
+        && exists(/databases/$(database)/documents/classes/$(request.resource.data.classId))
+        && request.resource.data.requestType in ['onDuty', 'leave']
+        && request.resource.data.startDate is string
+        && request.resource.data.startDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && request.resource.data.endDate is string
+        && request.resource.data.endDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && request.resource.data.startDate <= request.resource.data.endDate
+        && (!('subjectId' in request.resource.data)
+          || (request.resource.data.subjectId is string
+            && get(/databases/$(database)/documents/classes/$(request.resource.data.classId)).data.subjectIds
+              .hasAny([request.resource.data.subjectId])))
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() >= 5
+        && request.resource.data.reason.size() <= 1000
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+    function validDisputeCreate() {
+      let recordPath = /databases/$(database)/documents/attendanceRecords/$(request.resource.data.recordId);
+      return request.resource.data.keys().hasOnly([
+          'studentId', 'sessionId', 'recordId', 'classId', 'subjectId',
+          'date', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasAll([
+          'studentId', 'sessionId', 'recordId', 'classId', 'subjectId',
+          'date', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.sessionId is string
+        && request.resource.data.recordId == request.resource.data.sessionId + '_' + request.auth.uid
+        && exists(recordPath)
+        && get(recordPath).data.studentId == request.auth.uid
+        && get(recordPath).data.sessionId == request.resource.data.sessionId
+        && get(recordPath).data.classId == request.resource.data.classId
+        && get(recordPath).data.subjectId == request.resource.data.subjectId
+        && request.resource.data.date is string
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() >= 5
+        && request.resource.data.reason.size() <= 1000
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn()
+        && (request.auth.uid == uid || isAdmin() || guardianHasStudent(uid));
+      // Role assignment is performed by trusted server code, never by clients.
+      allow create: if isAdmin() && !('role' in request.resource.data);
+      allow update: if (
+          signedIn()
+          && isStudent()
+          && request.auth.uid == uid
+          && resource.data.get('role', null) == 'student'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['personalAttendanceThreshold'])
+          && request.resource.data.personalAttendanceThreshold is int
+          && request.resource.data.personalAttendanceThreshold >= 50
+          && request.resource.data.personalAttendanceThreshold <= 100
+        ) || (
+          isAdmin()
+          && request.resource.data.get('role', null) == resource.data.get('role', null)
+        );
+      allow delete: if false;
+    }
+    match /institutionSettings/{settingId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin() && validInstitutionSettings();
+      allow delete: if false;
+    }
+    match /students/{uid} {
+      allow read: if ownsStudent(uid) || isAdmin() || isFaculty() || guardianHasStudent(uid);
+      allow write: if isAdmin();
+    }
+    match /faculty/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if isAdmin();
+    }
+    match /subjects/{subjectId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+    match /classes/{classId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+    match /attendanceSessions/{sessionId} {
+      allow read: if isAdmin()
+        || (isFaculty() && (resource.data.facultyId == request.auth.uid
+          || assigned(resource.data.classId, resource.data.subjectId)))
+        || (isStudent() && resource.data.classId
+          == get(/databases/$(database)/documents/students/$(request.auth.uid)).data.classId);
+      // Session creation, closing, counts, and expiry are server controlled.
+      allow create, update, delete: if false;
+    }
+    match /attendanceRecords/{recordId} {
+      function recordSession() {
+        return get(/databases/$(database)/documents/attendanceSessions/$(resource.data.sessionId)).data;
+      }
+      allow read: if isAdmin()
+        || (isStudent() && resource.data.studentId == request.auth.uid)
+        || guardianHasStudent(resource.data.studentId)
+        || (isFaculty() && recordSession().facultyId == request.auth.uid
+          && assigned(recordSession().classId, recordSession().subjectId));
+      allow create: if request.resource.data.sessionId is string
+        && request.resource.data.studentId is string
+        && recordId == request.resource.data.sessionId + '_' + request.resource.data.studentId
+        && activeAssignedSession(request.resource.data.sessionId)
+        && request.resource.data.facultyId == request.auth.uid
+        && request.resource.data.status in ['present', 'absent', 'onDuty']
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.modifiedAt == request.time
+        && request.resource.data.keys().hasOnly([
+          'sessionId', 'studentId', 'classId', 'subjectId', 'status',
+          'facultyId', 'createdAt', 'modifiedAt'
+        ])
+        && request.resource.data.classId == get(/databases/$(database)/documents/attendanceSessions/$(request.resource.data.sessionId)).data.classId
+        && request.resource.data.subjectId == get(/databases/$(database)/documents/attendanceSessions/$(request.resource.data.sessionId)).data.subjectId
+        && studentBelongsToClass(
+          request.resource.data.studentId,
+          request.resource.data.classId
+        );
+      allow update: if activeAssignedSession(resource.data.sessionId)
+        && recordId == resource.data.sessionId + '_' + resource.data.studentId
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'modifiedAt'])
+        && request.resource.data.status in ['present', 'absent', 'onDuty']
+        && request.resource.data.modifiedAt == request.time;
+      allow delete: if false;
+    }
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.recipientId == request.auth.uid;
+      allow update: if signedIn() && resource.data.recipientId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['isRead', 'readAt'])
+        && request.resource.data.isRead is bool
+        && request.resource.data.isRead == true
+        && request.resource.data.readAt is timestamp;
+      allow create, delete: if false;
+    }
+    match /odLeaveRequests/{requestId} {
+      allow read: if isAdmin()
+        || (isStudent() && resource.data.studentId == request.auth.uid)
+        || mayReview(resource.data.classId, resource.data.subjectId);
+      allow create: if isStudent() && validRequestCreate();
+      allow update, delete: if false;
+    }
+    match /attendanceDisputes/{disputeId} {
+      allow read: if isAdmin()
+        || (isStudent() && resource.data.studentId == request.auth.uid)
+        || mayReview(resource.data.classId, resource.data.subjectId);
+      allow create: if isStudent() && validDisputeCreate();
+      allow update, delete: if false;
+    }
+    match /guardianLinks/{guardianId}/students/{studentId} {
+      allow read: if isAdmin()
+        || (isGuardian() && request.auth.uid == guardianId)
+        || ownsStudent(studentId);
+      // Link requests, consent, and revocation are handled by trusted callables.
+      allow create, update, delete: if false;
+    }
+  }
+}
