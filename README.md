@@ -11,6 +11,10 @@ A Flutter Android semester project starter with a role-based demonstration UI an
 
 The app has three role-specific navigation flows. Faculty can select a subject, update each student's status (Present, Absent, On Duty), mark everyone present, and save a dated summary. Saved summaries survive app restarts on that Android device. Students see attendance summaries, subject cards, below-threshold styling, and saved history. Admin sees a searchable directory view. Theme selection and sign-out are functional.
 
+## Download Android APK
+
+[Download the latest Android APK](https://github.com/nikith18/studenterp/releases/latest/download/app-release.apk). A GitHub Actions workflow builds the release APK and attaches it to GitHub Releases whenever a `v*` version tag is pushed. The APK runs in local demo mode and does not sync attendance to Firebase.
+
 ## Firebase setup required for production
 
 1. Create a Firebase project and Android app matching `com.example.studenterp` (or update the package consistently).
